@@ -50,25 +50,29 @@
 └── README.md
 ```
 
-У `/etc/systemd/system/` створюється **тільки символічне посилання**:
+У `/etc/systemd/system/` створюється **тільки символічне посилання** — скопіюйте цю команду цілком:
 
+```bash
+sudo ln -s /opt/fake-ntp/fake-ntp.service /etc/systemd/system/fake-ntp.service
 ```
-/etc/systemd/system/fake-ntp.service -> /opt/fake-ntp/fake-ntp.service
+
+Якщо лінк уже існує (наприклад, після перевстановлення), використайте `ln -sf`:
+
+```bash
+sudo ln -sf /opt/fake-ntp/fake-ntp.service /etc/systemd/system/fake-ntp.service
 ```
 
 Усі шляхи в `server.py` обчислюються від каталогу самого скрипта, тому
 переміщення проєкту не вимагає правки коду.
 
-> У назві сервісу скрізь використовується `fake-ntp` (колишній `multi-ntp`
-> у коді, базі та юніті перейменовано).
-
 ---
 
 ## 3. Встановлення
 
+Репозитарій публічний, тому простіше клонувати його одразу в `/opt/fake-ntp`:
+
 ```bash
-sudo mkdir -p /opt/fake-ntp
-sudo cp server.py config.json fake-ntp.service README.md /opt/fake-ntp/
+sudo git clone https://github.com/realwarrior3/fake-ntp.git /opt/fake-ntp
 sudo chmod 755 /opt/fake-ntp/server.py
 sudo chmod 644 /opt/fake-ntp/config.json /opt/fake-ntp/fake-ntp.service
 
@@ -77,35 +81,46 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now fake-ntp
 ```
 
-При першому запуску будуть створені:
+> Якщо `git` не встановлено: `sudo apt install git` (Debian/Ubuntu) або
+> `sudo dnf install git` (RHEL/Fedora).
 
-- `ntp.db` — база з одним правилом `0.0.0.0/0`;
-- `credentials.json` — випадковий пароль для користувача `admin`.
-
-Пароль можна побачити тільки у файлі:
+### Оновлення
 
 ```bash
-sudo cat /opt/fake-ntp/credentials.json
+cd /opt/fake-ntp
+sudo git pull
+sudo systemctl restart fake-ntp
 ```
 
-Формат файлу (дозволено декілька користувачів):
+При першому запуску створюється `ntp.db` з одним правилом `0.0.0.0/0`, а от
+`credentials.json` створюється **порожнім** — жоден пароль не генерується.
+
+Відкрийте у браузері `http://<ip-сервера>/`. Поки адміністратора немає, замість
+звичного інтерфейсу відкриється сторінка **«Перше налаштування»**. Введіть логін
+і пароль (мінімум 8 символів), підтвердьте пароль і натисніть «Створити адміністратора».
+Цей перший користувач одразу отримує роль `admin`. Після збереження файл
+`credentials.json` заповнюється, а сторінка перезавантажиться і попросить
+Basic-авторизацію з щойно створеними даними.
+
+Формат файлу після першого налаштування:
 
 ```json
 {
   "users": [
-    { "username": "admin", "password": "..." },
-    { "username": "operator", "password": "..." }
+    { "username": "admin", "password": "ваш-пароль", "role": "admin" }
   ]
 }
 ```
 
-Після зміни файлу перезапустіть сервіс:
+Щоб змінити пароль або додати ще користувачів, відредагуйте цей файл і перезапустіть сервіс:
 
 ```bash
+sudo nano /opt/fake-ntp/credentials.json
 sudo systemctl restart fake-ntp
 ```
 
 > Паролів немає ані в `server.py`, ані у `fake-ntp.service`. Не додавайте їх туди.
+> Повторний виклик `/api/setup` після створення адміністратора повертає `403`.
 
 ### Порти
 
@@ -222,6 +237,7 @@ sudo systemctl restart fake-ntp
 
 Можливості:
 
+- при першому запуску — створити логін і пароль адміністратора без генерування випадкового пароля;
 - додати/змінити/видалити правило для IP або CIDR;
 - вибрати будь-який IANA-часовий пояс;
 - увімкнути/вимкнути автоматичний DST для окремого правила;
@@ -251,21 +267,7 @@ curl -u admin:ПАРОЛЬ -H 'Content-Type: application/json' \
 
 ---
 
-## 7. Міграція зі старої версії (multi-ntp)
-
-1. Зупиніть старий сервіс: `sudo systemctl stop multi-ntp` (якщо він ще є).
-2. Скопіюйте стару базу (якщо вона потрібна):
-   `sudo cp /var/lib/multi-ntp/ntp.db /opt/fake-ntp/ntp.db`.
-3. Видаліть старий юніт і лінк:
-   `sudo rm -f /etc/systemd/system/multi-ntp.service`.
-4. Виконайте встановлення з розділу 3.
-5. Схема бази оновиться автоматично: `dst_zone` → `tz_name`,
-   `auto_dst` → `use_dst`. Старе поле `offset_hours` тепер означає
-   **додаткову корекцію**, а не повний зсув.
-
----
-
-## 8. Корисні команди
+## 7. Корисні команди
 
 ```bash
 sudo systemctl status fake-ntp
@@ -278,7 +280,7 @@ ntpdate -q <ip-сервера>
 
 ---
 
-## 9. Вимоги
+## 8. Вимоги
 
 - Python 3.9+ (модуль `zoneinfo`; на деяких ОС може знадобитися пакет `tzdata`).
 - Тільки стандартна бібліотека Python — жодних `pip`-залежностей.
@@ -288,7 +290,7 @@ ntpdate -q <ip-сервера>
 
 ---
 
-## 10. Що не потрапляє до Git
+## 9. Що не потрапляє до Git
 
 Файл `.gitignore` виключає робочі та тимчасові файли, які створюються
 під час роботи сервісу й не є частиною вихідного коду:

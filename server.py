@@ -21,7 +21,6 @@ import hmac
 import ipaddress
 import json
 import os
-import secrets
 import socket
 import sqlite3
 import struct
@@ -76,6 +75,7 @@ config = copy.deepcopy(DEFAULT_CONFIG)
 config_lock = threading.RLock()
 
 auth_users = []
+setup_lock = threading.Lock()
 
 rules_lock = threading.RLock()
 exact_rules = {}
@@ -179,30 +179,48 @@ def get_config():
 
 
 def init_credentials():
-    """Створює файл облікових даних з випадковим паролем за відсутності."""
+    """
+    Завантажує облікові дані. Якщо файлу ще немає — створює порожній список,
+    і перший вхід у веб-інтерфейс стане сторінкою створення адміністратора.
+    """
     global auth_users
     if not CRED_PATH.exists():
-        password = secrets.token_urlsafe(18)
-        data = {"users": [{"username": "admin", "password": password}]}
-        write_json(CRED_PATH, data, 0o600)
-        print(f"[AUTH] Створено {CRED_PATH}. Пароль знаходиться у цьому файлі (права 600).")
+        write_json(CRED_PATH, {"users": []}, 0o600)
+        print(f"[AUTH] Облікових даних немає. Відкрийте веб-інтерфейс і створіть логін/пароль адміністратора.")
+        auth_users = []
+        return
     try:
         with open(CRED_PATH, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         users = data.get("users", [])
-        if not isinstance(users, list) or not users:
-            raise ValueError("Порожній список users")
+        if not isinstance(users, list):
+            raise ValueError("users має бути списком")
         clean = []
         for u in users:
             username = str(u.get("username", ""))
             password = str(u.get("password", ""))
+            role = str(u.get("role", "user"))
             if username and password:
-                clean.append({"username": username, "password": password})
-        if not clean:
-            raise ValueError("Немає валідних користувачів")
+                clean.append({"username": username, "password": password, "role": role})
         auth_users = clean
     except Exception as e:
         raise RuntimeError(f"Не вдалося завантажити {CRED_PATH}: {e}")
+
+
+def needs_setup():
+    return len(auth_users) == 0
+
+
+def complete_setup(username, password):
+    """Створює першого користувача з правами адміна. Повторні виклики ігноруються."""
+    global auth_users
+    with setup_lock:
+        if auth_users:
+            return False
+        entry = {"username": username, "password": password, "role": "admin"}
+        write_json(CRED_PATH, {"users": [entry]}, 0o600)
+        auth_users = [entry]
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -226,21 +244,6 @@ def init_db():
             last_seen TEXT DEFAULT ''
         )
     """)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(rules)").fetchall()}
-
-    # Міграція зі старої схеми (dst_zone / auto_dst)
-    if "tz_name" not in cols:
-        conn.execute("ALTER TABLE rules ADD COLUMN tz_name TEXT NOT NULL DEFAULT 'UTC'")
-    if "use_dst" not in cols:
-        conn.execute("ALTER TABLE rules ADD COLUMN use_dst INTEGER NOT NULL DEFAULT 0")
-    if "dst_zone" in cols:
-        conn.execute(
-            "UPDATE rules SET tz_name = COALESCE(NULLIF(dst_zone, ''), 'UTC'), "
-            "use_dst = COALESCE(auto_dst, 0)"
-        )
-    elif "auto_dst" in cols:
-        conn.execute("UPDATE rules SET use_dst = COALESCE(auto_dst, 0)")
-
     cfg = get_config()
     conn.execute(
         "INSERT OR IGNORE INTO rules (target, name, offset_hours, tz_name, use_dst) "
@@ -534,6 +537,78 @@ def ntp_server_loop():
 # ---------------------------------------------------------------------------
 # Веб-інтерфейс
 # ---------------------------------------------------------------------------
+
+SETUP_PAGE = """<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fake NTP Server — перше налаштування</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 40px 20px; }
+  .card { max-width: 480px; margin: 0 auto; background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 24px; }
+  h1 { font-size: 1.25rem; margin: 0 0 8px; }
+  .hint { font-size: 0.85rem; color: #94a3b8; margin-bottom: 20px; }
+  label { display: block; font-size: 0.85rem; color: #94a3b8; margin: 12px 0 5px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #f8fafc; font-size: 0.95rem; }
+  button { margin-top: 20px; width: 100%; padding: 11px; border: none; border-radius: 6px; background: #3b82f6; color: white; font-weight: 600; cursor: pointer; }
+  #msg { margin-top: 14px; font-size: 0.85rem; color: #fca5a5; min-height: 1em; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Перше налаштування Fake NTP Server</h1>
+  <div class="hint">Створіть логін і пароль адміністратора. Ці дані зберігатимуться у файлі credentials.json і захищатимуть веб-інтерфейс та API.</div>
+  <form id="setupForm">
+    <label for="username">Логін</label>
+    <input type="text" id="username" autocomplete="username" required minlength="3" maxlength="64">
+
+    <label for="password">Пароль (мінімум 8 символів)</label>
+    <input type="password" id="password" autocomplete="new-password" required minlength="8" maxlength="256">
+
+    <label for="confirm">Повторіть пароль</label>
+    <input type="password" id="confirm" autocomplete="new-password" required minlength="8" maxlength="256">
+
+    <button type="submit">Створити адміністратора</button>
+  </form>
+  <div id="msg"></div>
+</div>
+<script>
+document.getElementById('setupForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  const payload = {
+    username: document.getElementById('username').value.trim(),
+    password: document.getElementById('password').value,
+    confirm: document.getElementById('confirm').value
+  };
+  if (payload.password !== payload.confirm) {
+    msg.textContent = 'Паролі не збігаються.';
+    return;
+  }
+  try {
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      msg.style.color = '#86efac';
+      msg.textContent = 'Готово. Зараз відкриється запит авторизації — введіть щойно створені дані.';
+      setTimeout(() => location.reload(), 1200);
+    } else {
+      msg.textContent = data.error || 'Не вдалося створити користувача.';
+    }
+  } catch (err) {
+    msg.textContent = "Помилка з'єднання з сервером.";
+  }
+});
+</script>
+</body>
+</html>
+"""
 
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="uk">
@@ -930,17 +1005,57 @@ class WebHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def send_page(self, html):
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_setup(self):
+        if not needs_setup():
+            self.send_json(403, {"error": "Адміністратор уже створений"})
+            return
+        try:
+            data = self.read_json()
+        except Exception:
+            self.send_json(400, {"error": "Некоректний JSON"})
+            return
+
+        username = str(data.get("username", "")).strip()
+        password = str(data.get("password", ""))
+        confirm = str(data.get("confirm", ""))
+
+        if not 3 <= len(username) <= 64:
+            self.send_json(400, {"error": "Логін має містити від 3 до 64 символів"})
+            return
+        if not 8 <= len(password) <= 256:
+            self.send_json(400, {"error": "Пароль має містити від 8 до 256 символів"})
+            return
+        if password != confirm:
+            self.send_json(400, {"error": "Паролі не збігаються"})
+            return
+        if not complete_setup(username, password):
+            self.send_json(403, {"error": "Адміністратор уже створений"})
+            return
+
+        print(f"[AUTH] Створено адміністратора '{username}' (роль admin)")
+        self.send_json(200, {"ok": True})
+
     def do_GET(self):
+        if self.path == "/" or self.path.startswith("/?"):
+            if needs_setup():
+                self.send_page(SETUP_PAGE)
+            else:
+                if not self.check_auth():
+                    return
+                self.send_page(HTML_PAGE)
+            return
+
         if not self.check_auth():
             return
-        if self.path == "/" or self.path.startswith("/?"):
-            body = HTML_PAGE.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path == "/api/rules":
+        if self.path == "/api/rules":
             self.api_rules()
         else:
             self.send_response(404)
@@ -998,6 +1113,10 @@ class WebHandler(BaseHTTPRequestHandler):
         })
 
     def do_POST(self):
+        if self.path == "/api/setup":
+            self.handle_setup()
+            return
+
         if not self.check_auth():
             return
         try:
