@@ -1,0 +1,16 @@
+[Unit]
+Description=Fake NTP Server (old devices, per-IP timezones)
+Documentation=file:/opt/fake-ntp/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fake-ntp
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/fake-ntp/server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

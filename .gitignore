@@ -1,0 +1,31 @@
+# Робочі дані сервісу (створюються локально, не комітяться)
+ntp.db
+ntp.db-journal
+ntp.db-wal
+ntp.db-shm
+*.sqlite
+*.sqlite-journal
+
+# Логіни та паролі — ніколи не заливати в Git
+credentials.json
+
+# Тимчасові файли, бекапи, логи
+*.tmp
+*.bak
+*.old
+*.log
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Службові файли ОС/редакторів
+.DS_Store
+Thumbs.db
+*.swp

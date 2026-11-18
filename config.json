@@ -1,0 +1,15 @@
+{
+  "ntp_port": 123,
+  "web_port": 80,
+  "default_timezone": "UTC",
+  "default_use_dst": false,
+  "upstream": {
+    "enabled": false,
+    "server": "pool.ntp.org",
+    "port": 123,
+    "timeout": 2.0,
+    "sync_interval": 300,
+    "set_system_clock": false,
+    "clock_set_threshold": 0.5
+  }
+}
