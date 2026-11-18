@@ -54,6 +54,7 @@ except Exception:
         "Australia/Sydney", "Pacific/Auckland",
     ]
 TIMEZONE_SET = set(TIMEZONES)
+_timezone_options_cache = None
 
 DEFAULT_CONFIG = {
     "ntp_port": 123,
@@ -332,6 +333,40 @@ def zone_offset_seconds(tz_name, use_dst, at=None):
     if not use_dst:
         offset -= local.dst() or timedelta(0)
     return int(offset.total_seconds())
+
+
+def format_offset(seconds):
+    """Форматує зсув у вигляді UTC+02:00 / UTC-05:45."""
+    total_minutes = int(round(seconds / 60.0))
+    sign = "-" if total_minutes < 0 else "+"
+    abs_minutes = abs(total_minutes)
+    hours = abs_minutes // 60
+    minutes = abs_minutes % 60
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+def get_timezone_options():
+    """
+    Повертає список поясів із підписами: стандартний зсув і, якщо відрізняється,
+    поточний зсув (активний літній час). Кешується на 1 годину.
+    """
+    global _timezone_options_cache
+    now = datetime.now(timezone.utc)
+    if _timezone_options_cache and (now - _timezone_options_cache[0]) < timedelta(hours=1):
+        return _timezone_options_cache[1]
+
+    options = []
+    for name in TIMEZONES:
+        standard = zone_offset_seconds(name, False, now)
+        current = zone_offset_seconds(name, True, now)
+        label = f"{name} ({format_offset(standard)}"
+        if current != standard:
+            label += f", зараз {format_offset(current)}"
+        label += ")"
+        options.append({"name": name, "label": label})
+
+    _timezone_options_cache = (now, options)
+    return options
 
 
 def rule_offset_seconds(rule):
@@ -806,8 +841,8 @@ async function loadData() {
 }
 
 function tzOptions(selected) {
-  return (serverInfo.timezones || []).map(t =>
-    `<option value="${esc(t)}"${t === selected ? ' selected' : ''}>${esc(t)}</option>`
+  return (serverInfo.timezone_options || []).map(o =>
+    `<option value="${esc(o.name)}"${o.name === selected ? ' selected' : ''}>${esc(o.label)}</option>`
   ).join('');
 }
 
@@ -870,7 +905,7 @@ function renderTable() {
     return `<tr>
       <td><b>${esc(r.target)}</b></td>
       <td>${esc(r.name || '—')}</td>
-      <td class="mono">${esc(r.tz_name)}</td>
+      <td class="mono">${esc(r.tz_label || r.tz_name)}</td>
       <td>${dstBadge}</td>
       <td>${sign}${correction} год</td>
       <td style="font-family:monospace; color:#38bdf8;">${esc(r.effective_time)} <span class="hint">${esc(fmtOffset(Number(r.total_offset_seconds || 0)))}</span></td>
@@ -1071,6 +1106,8 @@ class WebHandler(BaseHTTPRequestHandler):
 
         cfg = get_config()
         tz_default = cfg["default_timezone"]
+        tz_options = get_timezone_options()
+        tz_labels = {o["name"]: o["label"] for o in tz_options}
         try:
             local_now = datetime.now(ZoneInfo(tz_default)).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
@@ -1080,6 +1117,7 @@ class WebHandler(BaseHTTPRequestHandler):
         for r in rows:
             if not valid_timezone(r.get("tz_name")):
                 r["tz_name"] = "UTC"
+            r["tz_label"] = tz_labels.get(r["tz_name"], r["tz_name"])
             total = up_offset + rule_offset_seconds(r)
             eff = datetime.fromtimestamp(time.time() + total, tz=timezone.utc)
             r["total_offset_seconds"] = total
@@ -1106,7 +1144,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 "local_time": local_now,
                 "default_timezone": tz_default,
                 "default_use_dst": cfg["default_use_dst"],
-                "timezones": TIMEZONES,
+                "timezone_options": tz_options,
                 "upstream": upstream_public,
             },
             "rules": rows,
